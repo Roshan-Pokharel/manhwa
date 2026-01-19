@@ -1,0 +1,29 @@
+{
+  "name": "manhwa-server",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "axios": "^1.13.2",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.2.1",
+    "groq-sdk": "^0.37.0",
+    "gtts": "^0.2.1",
+    "msedge-tts": "^2.0.3",
+    "multer": "^2.0.2",
+    "ollama": "^0.6.3",
+    "puppeteer": "^24.35.0",
+    "sharp": "^0.34.5",
+    "tesseract.js": "^7.0.0"
+  }
+}
