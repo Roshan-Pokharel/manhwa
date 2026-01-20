@@ -15,10 +15,9 @@ app.use(cors());
 // --- 1. SERVE BACKEND PUBLIC FILES (Audio Output) ---
 const publicDir = path.join(__dirname, 'public');
 if (!fs.existsSync(publicDir)) fs.mkdirSync(publicDir);
-app.use(express.static('public')); // Access audio via localhost:5000/audio-xyz.mp3
+app.use(express.static('public')); 
 
 // --- 2. SERVE FRONTEND STATIC FILES (Vite Build) ---
-// Note: If your folder is named 'build' instead of 'dist', change 'dist' to 'build' below.
 const frontendDir = path.join(__dirname, 'build');
 if (fs.existsSync(frontendDir)) {
     app.use(express.static(frontendDir));
@@ -47,43 +46,37 @@ function chunkText(text, maxLength = 2000) {
     return chunks;
 }
 
-// --- AUTOMATIC CLEANUP (Delete Audio & Jobs) ---
+// --- AUTOMATIC CLEANUP (Optional Fallback) ---
+// Kept this to clean up the *last* remaining file after an hour, 
+// but the main deletion logic is now inside processAudioJob.
 const cleanup = () => {
     const now = Date.now();
-    const ONE_HOUR = 3600 * 1000; // 1 Hour timeout
+    const ONE_HOUR = 3600 * 1000; 
 
     Object.keys(jobs).forEach(id => {
         if (now - jobs[id].createdAt > ONE_HOUR) {
             const filename = `audio-${id}.mp3`;
             const filePath = path.join(publicDir, filename);
 
-            // 1. Delete the physical file if it exists
             if (fs.existsSync(filePath)) {
                 fs.unlinkSync(filePath);
                 console.log(`Deleted expired file: ${filename}`);
             }
-
-            // 2. Delete the job record
             delete jobs[id];
         }
     });
 };
-// Run cleanup check every 15 minutes
 setInterval(cleanup, 15 * 60 * 1000); 
 
 /* ROUTES */
 
-// --- FORCE DIRECT DOWNLOAD ---
 app.get('/download/:filename', (req, res) => {
     const filename = req.params.filename;
     const filePath = path.join(publicDir, filename);
 
-    // Security check: prevent directory traversal
     if (filename.includes('..') || !fs.existsSync(filePath)) {
         return res.status(404).send('File not found or expired.');
     }
-
-    // This header forces the browser to download instead of play
     res.download(filePath, filename);
 });
 
@@ -93,7 +86,6 @@ app.post('/preview-voice', async (req, res) => {
 
     const fileName = `preview-${voice}.mp3`;
     const filePath = path.join(publicDir, fileName);
-    // Note: Since frontend and backend are same origin now, we can use relative path or full URL
     const fileUrl = `/preview-${voice}.mp3`; 
 
     if (fs.existsSync(filePath)) {
@@ -172,13 +164,30 @@ async function processAudioJob(jobId, script, voice) {
         const fileName = `audio-${jobId}.mp3`;
         const filePath = path.join(publicDir, fileName);
         
+        // --- 🔴 START NEW LOGIC: DELETE PREVIOUS AUDIO FILES 🔴 ---
+        // This ensures only the new file exists (plus preview files)
+        try {
+            const existingFiles = fs.readdirSync(publicDir);
+            existingFiles.forEach(file => {
+                // Delete if it starts with 'audio-' AND ends with '.mp3'
+                // This protects 'preview-...' files
+                if (file.startsWith('audio-') && file.endsWith('.mp3')) {
+                    fs.unlinkSync(path.join(publicDir, file));
+                    console.log(`Deleted previous generation: ${file}`);
+                }
+            });
+        } catch (cleanupErr) {
+            console.warn("Warning: Could not clean up old files:", cleanupErr);
+        }
+        // --- 🔴 END NEW LOGIC 🔴 ---
+
         fs.writeFileSync(filePath, finalBuffer);
 
         job.status = 'completed';
         job.progress = 100;
         job.result = {
             filename: fileName, 
-            audioUrl: `/${fileName}`, // Updated to relative path
+            audioUrl: `/${fileName}`, 
             durationEstimate: `${(script.length / 15 / 60).toFixed(1)} mins`
         };
 
@@ -189,9 +198,7 @@ async function processAudioJob(jobId, script, voice) {
     }
 }
 
-// --- 3. CATCH-ALL ROUTE (For Single Page App Support) ---
-// This handles any requests that don't match the API routes or static files above
-// It sends the index.html so React/Vite handles the routing (e.g., /about, /dashboard)
+// --- 3. CATCH-ALL ROUTE ---
 app.get(/(.*)/, (req, res) => {
     if (fs.existsSync(path.join(frontendDir, 'index.html'))) {
         res.sendFile(path.join(frontendDir, 'index.html'));
@@ -199,4 +206,5 @@ app.get(/(.*)/, (req, res) => {
         res.status(404).send('Frontend not built or index.html missing.');
     }
 });
+
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
