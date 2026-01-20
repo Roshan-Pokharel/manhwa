@@ -140,47 +140,66 @@ async function processAudioJob(jobId, script, voice) {
     job.status = 'processing';
     
     try {
+        // 1. Chunk the text
         const chunks = chunkText(script);
         const audioBuffers = [];
+        
+        // 2. Initialize TTS
         const tts = new MsEdgeTTS();
         await tts.setMetadata(voice || 'en-US-ChristopherNeural', OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3);
 
+        // 3. Loop through chunks with RETRY logic
         for (let i = 0; i < chunks.length; i++) {
             const percent = Math.round(((i) / chunks.length) * 100);
             job.progress = percent;
-            
-            const { audioStream } = await tts.toStream(chunks[i]);
-            const chunkBuffer = await new Promise((resolve, reject) => {
-                const _buf = [];
-                audioStream.on('data', c => _buf.push(c));
-                audioStream.on('end', () => resolve(Buffer.concat(_buf)));
-                audioStream.on('error', reject);
-            });
 
-            audioBuffers.push(chunkBuffer);
-            await new Promise(r => setTimeout(r, 50)); 
+            let attempts = 0;
+            let success = false;
+
+            while (!success && attempts < 3) {
+                try {
+                    attempts++;
+                    // Create a promise for this specific chunk
+                    const { audioStream } = await tts.toStream(chunks[i]);
+                    
+                    const chunkBuffer = await new Promise((resolve, reject) => {
+                        const _buf = [];
+                        audioStream.on('data', c => _buf.push(c));
+                        audioStream.on('end', () => resolve(Buffer.concat(_buf)));
+                        audioStream.on('error', (err) => reject(err));
+                    });
+
+                    audioBuffers.push(chunkBuffer);
+                    success = true; // Mark as done to exit the while loop
+
+                    // Pause specifically to avoid "Connect Error" (Rate Limiting)
+                    await new Promise(r => setTimeout(r, 500)); 
+
+                } catch (chunkError) {
+                    console.warn(`Chunk ${i} failed (Attempt ${attempts}/3). Retrying...`, chunkError);
+                    if (attempts >= 3) throw chunkError; // Fail job if 3 tries fail
+                    await new Promise(r => setTimeout(r, 2000)); // Wait 2s before retry
+                }
+            }
         }
 
         const finalBuffer = Buffer.concat(audioBuffers);
         const fileName = `audio-${jobId}.mp3`;
         const filePath = path.join(publicDir, fileName);
         
-        // ============================================================
-        // 🔴 CRITICAL CHANGE: DELETE ALL EXISTING AUDIO FILES FIRST 🔴
-        // ============================================================
+        // --- CLEANUP LOGIC ---
         try {
             const files = fs.readdirSync(publicDir);
             for (const file of files) {
-                // Check if file starts with 'audio-' (to avoid deleting previews)
                 if (file.startsWith('audio-') && file.endsWith('.mp3')) {
                     fs.unlinkSync(path.join(publicDir, file));
-                    console.log(`Deleted previous file to save space: ${file}`);
+                    console.log(`Deleted previous file: ${file}`);
                 }
             }
         } catch (err) {
             console.error("Error clearing old files:", err);
         }
-        // ============================================================
+        // ---------------------
 
         fs.writeFileSync(filePath, finalBuffer);
 
@@ -193,9 +212,9 @@ async function processAudioJob(jobId, script, voice) {
         };
 
     } catch (err) {
-        console.error(`Job ${jobId} failed:`, err);
+        console.error(`Job ${jobId} failed FINAL:`, err);
         job.status = 'failed';
-        job.error = err.message;
+        job.error = "Connection failed. Please check your internet or try again.";
     }
 }
 
