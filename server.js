@@ -47,8 +47,7 @@ function chunkText(text, maxLength = 2000) {
 }
 
 // --- AUTOMATIC CLEANUP (Optional Fallback) ---
-// Kept this to clean up the *last* remaining file after an hour, 
-// but the main deletion logic is now inside processAudioJob.
+// This acts as a backup to delete the LAST file if no new files are created for an hour.
 const cleanup = () => {
     const now = Date.now();
     const ONE_HOUR = 3600 * 1000; 
@@ -74,9 +73,11 @@ app.get('/download/:filename', (req, res) => {
     const filename = req.params.filename;
     const filePath = path.join(publicDir, filename);
 
+    // Security check + File existence check
     if (filename.includes('..') || !fs.existsSync(filePath)) {
         return res.status(404).send('File not found or expired.');
     }
+
     res.download(filePath, filename);
 });
 
@@ -164,22 +165,22 @@ async function processAudioJob(jobId, script, voice) {
         const fileName = `audio-${jobId}.mp3`;
         const filePath = path.join(publicDir, fileName);
         
-        // --- 🔴 START NEW LOGIC: DELETE PREVIOUS AUDIO FILES 🔴 ---
-        // This ensures only the new file exists (plus preview files)
+        // ============================================================
+        // 🔴 CRITICAL CHANGE: DELETE ALL EXISTING AUDIO FILES FIRST 🔴
+        // ============================================================
         try {
-            const existingFiles = fs.readdirSync(publicDir);
-            existingFiles.forEach(file => {
-                // Delete if it starts with 'audio-' AND ends with '.mp3'
-                // This protects 'preview-...' files
+            const files = fs.readdirSync(publicDir);
+            for (const file of files) {
+                // Check if file starts with 'audio-' (to avoid deleting previews)
                 if (file.startsWith('audio-') && file.endsWith('.mp3')) {
                     fs.unlinkSync(path.join(publicDir, file));
-                    console.log(`Deleted previous generation: ${file}`);
+                    console.log(`Deleted previous file to save space: ${file}`);
                 }
-            });
-        } catch (cleanupErr) {
-            console.warn("Warning: Could not clean up old files:", cleanupErr);
+            }
+        } catch (err) {
+            console.error("Error clearing old files:", err);
         }
-        // --- 🔴 END NEW LOGIC 🔴 ---
+        // ============================================================
 
         fs.writeFileSync(filePath, finalBuffer);
 
