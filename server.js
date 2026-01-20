@@ -9,26 +9,25 @@ const crypto = require('crypto');
 const app = express();
 const PORT = process.env.PORT || 5000;
 
+// Increase limit for heavy scripts
 app.use(express.json({ limit: '50mb' }));
 app.use(cors());
 
-// --- 1. SERVE BACKEND PUBLIC FILES (Audio Output) ---
+// --- 1. SERVE AUDIO FILES ---
 const publicDir = path.join(__dirname, 'public');
 if (!fs.existsSync(publicDir)) fs.mkdirSync(publicDir);
 app.use(express.static('public')); 
 
-// --- 2. SERVE FRONTEND STATIC FILES (Vite Build) ---
-const frontendDir = path.join(__dirname, 'build');
-if (fs.existsSync(frontendDir)) {
-    app.use(express.static(frontendDir));
+// --- 2. SERVE FRONTEND (DIST) ---
+// Vite builds to 'dist' by default. We check for that.
+const distDir = path.join(__dirname, 'dist');
+if (fs.existsSync(distDir)) {
+    app.use(express.static(distDir));
 } else {
-    console.warn("⚠️  Frontend build folder ('dist') not found. Run 'npm run build' in your frontend first.");
+    console.warn("⚠️  Frontend build folder ('dist') not found. Render will fix this automatically if you added the 'build' script to package.json.");
 }
 
-// --- PREVIEW CONFIG ---
-const PREVIEW_TEXT = "Hello! I am the personal assistant for the Manga Epicenter text-to-audio converter.";
-
-// --- IN-MEMORY JOB STORE ---
+// --- JOB STORE ---
 const jobs = {}; 
 
 function chunkText(text, maxLength = 2000) {
@@ -46,38 +45,14 @@ function chunkText(text, maxLength = 2000) {
     return chunks;
 }
 
-// --- AUTOMATIC CLEANUP (Optional Fallback) ---
-// This acts as a backup to delete the LAST file if no new files are created for an hour.
-const cleanup = () => {
-    const now = Date.now();
-    const ONE_HOUR = 3600 * 1000; 
-
-    Object.keys(jobs).forEach(id => {
-        if (now - jobs[id].createdAt > ONE_HOUR) {
-            const filename = `audio-${id}.mp3`;
-            const filePath = path.join(publicDir, filename);
-
-            if (fs.existsSync(filePath)) {
-                fs.unlinkSync(filePath);
-                console.log(`Deleted expired file: ${filename}`);
-            }
-            delete jobs[id];
-        }
-    });
-};
-setInterval(cleanup, 15 * 60 * 1000); 
-
-/* ROUTES */
+// --- API ROUTES ---
 
 app.get('/download/:filename', (req, res) => {
     const filename = req.params.filename;
     const filePath = path.join(publicDir, filename);
-
-    // Security check + File existence check
     if (filename.includes('..') || !fs.existsSync(filePath)) {
         return res.status(404).send('File not found or expired.');
     }
-
     res.download(filePath, filename);
 });
 
@@ -87,7 +62,8 @@ app.post('/preview-voice', async (req, res) => {
 
     const fileName = `preview-${voice}.mp3`;
     const filePath = path.join(publicDir, fileName);
-    const fileUrl = `/preview-${voice}.mp3`; 
+    // Relative URL for frontend
+    const fileUrl = `/${fileName}`; 
 
     if (fs.existsSync(filePath)) {
         return res.json({ audioUrl: fileUrl });
@@ -96,7 +72,8 @@ app.post('/preview-voice', async (req, res) => {
     try {
         const tts = new MsEdgeTTS();
         await tts.setMetadata(voice, OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3);
-        const { audioStream } = await tts.toStream(PREVIEW_TEXT);
+        const { audioStream } = await tts.toStream("Hello! I am your AI narrator.");
+        
         const buffer = await new Promise((resolve, reject) => {
             const _buf = [];
             audioStream.on('data', c => _buf.push(c));
@@ -107,8 +84,8 @@ app.post('/preview-voice', async (req, res) => {
         fs.writeFileSync(filePath, buffer);
         res.json({ audioUrl: fileUrl });
     } catch (err) {
-        console.error("Preview generation failed:", err);
-        res.status(500).json({ error: "Failed to generate preview" });
+        console.error("Preview error:", err);
+        res.status(500).json({ error: "Preview failed" });
     }
 });
 
@@ -140,66 +117,38 @@ async function processAudioJob(jobId, script, voice) {
     job.status = 'processing';
     
     try {
-        // 1. Chunk the text
         const chunks = chunkText(script);
         const audioBuffers = [];
-        
-        // 2. Initialize TTS
         const tts = new MsEdgeTTS();
         await tts.setMetadata(voice || 'en-US-ChristopherNeural', OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3);
 
-        // 3. Loop through chunks with RETRY logic
         for (let i = 0; i < chunks.length; i++) {
             const percent = Math.round(((i) / chunks.length) * 100);
             job.progress = percent;
+            
+            const { audioStream } = await tts.toStream(chunks[i]);
+            const chunkBuffer = await new Promise((resolve, reject) => {
+                const _buf = [];
+                audioStream.on('data', c => _buf.push(c));
+                audioStream.on('end', () => resolve(Buffer.concat(_buf)));
+                audioStream.on('error', reject);
+            });
 
-            let attempts = 0;
-            let success = false;
-
-            while (!success && attempts < 3) {
-                try {
-                    attempts++;
-                    // Create a promise for this specific chunk
-                    const { audioStream } = await tts.toStream(chunks[i]);
-                    
-                    const chunkBuffer = await new Promise((resolve, reject) => {
-                        const _buf = [];
-                        audioStream.on('data', c => _buf.push(c));
-                        audioStream.on('end', () => resolve(Buffer.concat(_buf)));
-                        audioStream.on('error', (err) => reject(err));
-                    });
-
-                    audioBuffers.push(chunkBuffer);
-                    success = true; // Mark as done to exit the while loop
-
-                    // Pause specifically to avoid "Connect Error" (Rate Limiting)
-                    await new Promise(r => setTimeout(r, 500)); 
-
-                } catch (chunkError) {
-                    console.warn(`Chunk ${i} failed (Attempt ${attempts}/3). Retrying...`, chunkError);
-                    if (attempts >= 3) throw chunkError; // Fail job if 3 tries fail
-                    await new Promise(r => setTimeout(r, 2000)); // Wait 2s before retry
-                }
-            }
+            audioBuffers.push(chunkBuffer);
+            // Small delay to prevent rate limiting
+            await new Promise(r => setTimeout(r, 50)); 
         }
 
         const finalBuffer = Buffer.concat(audioBuffers);
         const fileName = `audio-${jobId}.mp3`;
         const filePath = path.join(publicDir, fileName);
-        
-        // --- CLEANUP LOGIC ---
-        try {
-            const files = fs.readdirSync(publicDir);
-            for (const file of files) {
-                if (file.startsWith('audio-') && file.endsWith('.mp3')) {
-                    fs.unlinkSync(path.join(publicDir, file));
-                    console.log(`Deleted previous file: ${file}`);
-                }
+
+        // Clean up old "audio-" files only (keep previews)
+        fs.readdirSync(publicDir).forEach(file => {
+            if (file.startsWith('audio-') && file.endsWith('.mp3')) {
+                try { fs.unlinkSync(path.join(publicDir, file)); } catch(e){}
             }
-        } catch (err) {
-            console.error("Error clearing old files:", err);
-        }
-        // ---------------------
+        });
 
         fs.writeFileSync(filePath, finalBuffer);
 
@@ -212,18 +161,20 @@ async function processAudioJob(jobId, script, voice) {
         };
 
     } catch (err) {
-        console.error(`Job ${jobId} failed FINAL:`, err);
+        console.error(`Job ${jobId} failed:`, err);
         job.status = 'failed';
-        job.error = "Connection failed. Please check your internet or try again.";
+        job.error = err.message;
     }
 }
 
-// --- 3. CATCH-ALL ROUTE ---
-app.get(/(.*)/, (req, res) => {
-    if (fs.existsSync(path.join(frontendDir, 'index.html'))) {
-        res.sendFile(path.join(frontendDir, 'index.html'));
+// --- 3. CATCH-ALL FOR REACT ROUTER ---
+// This must be the LAST route.
+app.get('*', (req, res) => {
+    if (fs.existsSync(path.join(distDir, 'index.html'))) {
+        res.sendFile(path.join(distDir, 'index.html'));
     } else {
-        res.status(404).send('Frontend not built or index.html missing.');
+        // Fallback if build is missing
+        res.status(404).send('Frontend not built. Run npm run build.');
     }
 });
 
